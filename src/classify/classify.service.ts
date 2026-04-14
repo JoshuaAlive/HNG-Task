@@ -1,8 +1,6 @@
 import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
-import { firstValueFrom } from 'rxjs';
-import { ClassifyResult } from 'src/classifize/classifyResult';
-
+import { firstValueFrom, timeout } from 'rxjs';
 
 @Injectable()
 export class ClassifyService {
@@ -11,48 +9,59 @@ export class ClassifyService {
 
   constructor(private readonly httpService: HttpService) {}
 
-  async classify(name: string): Promise<ClassifyResult> {
+  async classify(name: string) {
     let raw: any;
 
-    // ── 1. Call Genderize API 
+    // ── Call Genderize ─────────────────────────────────────────────────────
     try {
-      const { data } = await firstValueFrom(
-        this.httpService.get(this.GENDERIZE_URL, { params: { name } }),
+      const response = await firstValueFrom(
+        this.httpService.get(this.GENDERIZE_URL, {
+          params: { name },
+          timeout: 8000,
+        }),
       );
-      raw = data;
-    } catch (error) {
-      this.logger.error('Genderize upstream error', error);
+      raw = response.data;
+      this.logger.log(`Genderize raw response: ${JSON.stringify(raw)}`);
+    } catch (err: any) {
+      this.logger.error('Genderize API error:', err?.message);
       throw new HttpException(
         { status: 'error', message: 'Failed to reach the Genderize API' },
         HttpStatus.BAD_GATEWAY,
       );
     }
 
-    // ── 2. Edge-case: no prediction 
-    if (!raw.gender || raw.count === 0) {
+    // ── Edge case: no prediction available ─────────────────────────────────
+    if (raw.gender === null || raw.gender === undefined || raw.count === 0) {
       throw new HttpException(
         {
           status: 'error',
           message: 'No prediction available for the provided name',
         },
-        HttpStatus.OK, // spec doesn't mandate a 4xx here, return 200 with error body
+        HttpStatus.OK,
       );
     }
 
-    // ── 3. Extract & transform 
-    const gender: string       = raw.gender;
-    const probability: number  = raw.probability;
-    const sample_size: number  = raw.count;           // rename: count → sample_size
+    // ── Extract & rename ───────────────────────────────────────────────────
+    const gender: string      = raw.gender;
+    const probability: number = Number(raw.probability);
+    const sample_size: number = Number(raw.count);       // count → sample_size
 
-    // ── 4. Confidence logic ────────────────────────────────────────────────
+    // ── Confidence logic ───────────────────────────────────────────────────
     const is_confident: boolean = probability >= 0.7 && sample_size >= 100;
 
-    // ── 5. Timestamp – for each request, always UTC ISO 8601
+    // ── Fresh UTC timestamp every request ──────────────────────────────────
     const processed_at: string = new Date().toISOString();
 
     return {
       status: 'success',
-      data: { name, gender, probability, sample_size, is_confident, processed_at },
+      data: {
+        name,
+        gender,
+        probability,
+        sample_size,
+        is_confident,
+        processed_at,
+      },
     };
   }
 }
